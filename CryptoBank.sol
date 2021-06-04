@@ -24,22 +24,41 @@ contract CryptoBank {
     event action_BlockAcct(uint _account);
     
     event action_DeleteAccount(uint _account);
+
+    event loan_Create(uint amount, uint _account, bool isCollateralized);
+    
+    event loan_RequestCreated(uint amount, uint _account, bool isCollateralized);
     
     // structs
     struct Account {
+        address owner;
+        bool hasLoan;
+        bool isBlocked;
         string firstName;
         string lastName;
-        uint256 uid;
-        address owner;
         uint256 balance;
-        bool isBlocked;
-        bool hasLoan;
+        uint256 uid;
+    }
+
+    struct Loan {
+        address owner;
+        bool isApproved;
+        bool isCollateralized;
+        bool isPayed;
+        uint account;
+        uint256 amount;
+        uint256 startDate;
+        uint256 totalPayed;
     }
     
     // mappings
     mapping(address => uint256[]) public clientAccounts;
     mapping(uint256 => Account) accounts;
+    mapping(uint256 => Loan) approvedLoans;
     
+    // loan requests
+    Loan[] private requestedLoans;
+
     // modifiers
     modifier isOwner(uint uid) {
         uint[] memory c_Accounts = clientAccounts[msg.sender];
@@ -49,32 +68,42 @@ contract CryptoBank {
                 hasAccount = true;
             } 
         }
-        require(hasAccount == true, To make this operation, you have to be the owner of the account.);
+        require(hasAccount == true, "To make this operation, you have to be the owner of the account.");
         _;
     }
     
     modifier isNotBlocked(uint _from) {
-        require(accounts[_from].isBlocked == false, The account is blocked to make transfers.);
+        require(accounts[_from].isBlocked == false, "The account is blocked to make transfers.");
         _;
     }
     
     modifier sufficientBalance(uint _from, uint amount) {
-        require(accounts[_from].balance > amount, Insufficient funds. Please deposit more funds to make this operation.);
+        require(accounts[_from].balance > amount, "Insufficient funds. Please deposit more funds to make this operation.");
         _;
     }
     
     modifier accountsExist(uint _to, uint _from) {
-        require(accounts[_to].uid != uint256(0) && accounts[_from].uid != uint256(0), One of the accounts does not exist.);
+        require(accounts[_to].uid != uint256(0) && accounts[_from].uid != uint256(0), "One of the accounts does not exist.");
         _;
     }
     
     modifier accountExists(uint _acct) {
-        require(accounts[_acct].uid != uint256(0), The account does not exist.);
+        require(accounts[_acct].uid != uint256(0), "The account does not exist.");
         _;
     }
     
     modifier isBank {
-        require(msg.sender == _bankAddr, Only the bank can make this operation.);
+        require(msg.sender == _bankAddr, "Only the bank can make this operation.");
+        _;
+    }
+
+    modifier bankCanLoan(uint256 loanAmount) {
+        require(_bankBalance >= loanAmount, "The bank is out of funds");
+        _;
+    }
+
+    modifier clientHasLoan(uint256 _account) {
+        require(accounts[_account].hasLoan == false, "The client already has a loan");
         _;
     }
     
@@ -126,14 +155,15 @@ contract CryptoBank {
     
     function setBlockAccount(uint _account, bool _isBlocked) public isBank {
         if (accounts[_account].isBlocked == true){
-            require(_isBlocked != true, The account is already blocked.);
+            require(_isBlocked != true, "The account is already blocked.");
         } else {
-            require(_isBlocked != false, The account is already unblocked.);
+            require(_isBlocked != false, "The account is already unblocked.");
         }
         accounts[_account].isBlocked = _isBlocked;
         emit action_BlockAcct(_account);
     }
     
+    // function to erase accounts from clientAccounts.
     function swapArray(uint[] storage myArray, uint index) internal {
         uint element = myArray[index];
         myArray[index] = myArray[myArray.length - 1];
@@ -152,6 +182,61 @@ contract CryptoBank {
         swapArray(clientAccounts[acctOwner], acctToDeleteIdx); // swap positions with the last position to delete locally.
         delete accounts[_account]; // delete from mapping
         emit action_DeleteAccount(_account);
+    }
+
+    function getNextLoanRequest()
+        public
+        isBank
+        view
+        returns(uint256 [2] memory)
+    {
+        Loan storage newLoan = requestedLoans[requestedLoans.length - 1];
+        uint256 [2] memory info = [newLoan.account, newLoan.amount];
+        return info;
+    }
+
+    function requestLoan(
+        uint amount, uint _account, bool isCollateralized
+    )
+        public 
+        clientHasLoan(_account)
+        bankCanLoan(amount)
+        isBank
+    {
+        requestedLoans.push(Loan({
+            owner: msg.sender,
+            isApproved: false,
+            isCollateralized: isCollateralized,
+            isPayed: false,
+            account: _account,
+            amount: amount,
+            startDate: 0,
+            totalPayed: 0
+        }));
+
+        emit loan_RequestCreated(amount, _account, isCollateralized);
+    }
+
+    function approveOrRejectLoan(bool _decision) 
+        public
+        isBank
+        returns (bool)
+    {   
+        Loan memory loan = requestedLoans[requestedLoans.length - 1];
+        if (_decision == true) {
+            approvedLoans[loan.account] = loan;
+            requestedLoans.pop();
+        } else {
+            requestedLoans.pop();
+        }
+        return _decision;
+    }
+
+    function payLoan(uint256 amount, uint256 _account) 
+        public
+        payable
+    {
+
     }
 }
 
