@@ -1,14 +1,19 @@
-pragma solidity ^0.7.0;
+pragma solidity ^0.8.3;
 
 contract CryptoBank {
     // vars
     uint public accountsNo;
-    uint private _bankBalance;
+    uint public _bankBalance;
     address private _bankAddr;
     
     // uid generator
     uint uidDigits = 8;
     uint uidModulus = 10 ** uidDigits;
+    
+    // mappings
+    mapping(address => uint256) public clientAccounts;
+    mapping(uint256 => Account) accounts;
+    mapping(uint256 => Loan) approvedLoans;
     
     constructor() {
         _bankAddr = msg.sender;
@@ -24,10 +29,17 @@ contract CryptoBank {
     event action_BlockAcct(uint _account);
     
     event action_DeleteAccount(uint _account);
-
+    
+    // loan events.
     event loan_Create(uint amount, uint _account, bool isCollateralized);
     
     event loan_RequestCreated(uint amount, uint _account, bool isCollateralized);
+
+    event loan_ApprovedOrRejected(uint _account, bool _decision);
+    
+    event loan_AmountPayed(uint _account, uint amount);
+
+    event view_NextLoanAmount(uint account, uint amountLoaned);
     
     // structs
     struct Account {
@@ -46,29 +58,20 @@ contract CryptoBank {
         bool isCollateralized;
         bool isPayed;
         uint account;
-        uint256 amount;
+        uint256 amountLoaned;
         uint256 startDate;
+        uint256 endDate;
         uint256 totalPayed;
+        uint256 totalOwned;
     }
-    
-    // mappings
-    mapping(address => uint256[]) public clientAccounts;
-    mapping(uint256 => Account) accounts;
-    mapping(uint256 => Loan) approvedLoans;
-    
+
     // loan requests
     Loan[] private requestedLoans;
 
     // modifiers
     modifier isOwner(uint uid) {
-        uint[] memory c_Accounts = clientAccounts[msg.sender];
-        bool hasAccount = false;
-        for (uint i = 0; i < c_Accounts.length; i++) {
-            if (uid == c_Accounts[i]) {
-                hasAccount = true;
-            } 
-        }
-        require(hasAccount == true, "To make this operation, you have to be the owner of the account.");
+        uint c_Account = clientAccounts[msg.sender];
+        require(c_Account != 0, "To make this operation, you have to be the owner of the account.");
         _;
     }
     
@@ -106,9 +109,31 @@ contract CryptoBank {
         require(accounts[_account].hasLoan == false, "The client already has a loan");
         _;
     }
+
+    modifier onlyOneAccount {
+        require(accounts[clientAccounts[msg.sender]].owner == address(0), "The client already has an account");
+        _;
+    }
     
     // functions
-    function createAccount(string memory _fName, string memory _lName) public {
+    function addDummyLoan() public returns(Loan memory) {
+        approvedLoans[12345678] = Loan({
+            owner: msg.sender,
+            isApproved: true,
+            isCollateralized: false,
+            isPayed: false,
+            account: 12345678,
+            amountLoaned: 1000,
+            startDate: 1609912800,
+            endDate: 1612591200,
+            totalPayed: 0,
+            // should be calculated initial amount.
+            totalOwned: 1100
+        });
+        return approvedLoans[12345678];
+    }
+    
+    function createAccount(string memory _fName, string memory _lName) public onlyOneAccount {
         bytes memory _seed = abi.encodePacked(_fName, _lName, block.timestamp);
         uint rand = uint(keccak256(_seed));
         uint randomId = rand % uidModulus;
@@ -117,23 +142,29 @@ contract CryptoBank {
             firstName: _fName,
             lastName: _lName,
             uid: randomId,
-            balance: 0.0,
+            balance: 0,
             isBlocked: false,
             hasLoan: false,
             owner: msg.sender
         });
         
-        uint[] storage cAccounts = clientAccounts[msg.sender];
-        cAccounts.push(randomId);
+        clientAccounts[msg.sender] = randomId;
         accountsNo++;
         emit actionAccountCreated(_fName, _lName, randomId);
     }
     
     function depositToAccount(uint accountId) public payable {
+        require(msg.value != 0, "Should at least deposit a fraction of a number, not 0.");
+        
         uint256 amount = msg.value;
-        payable(_bankAddr).transfer(amount);
-        accounts[accountId].balance += accounts[accountId].balance + amount;
-        emit actionDeposit(accountId, accounts[accountId].balance);
+        
+        payable(_bankAddr).transfer(amount); // updates the real fungible money in the bank.
+        
+        _bankBalance += amount; // updates the static amount of bank;
+        
+        accounts[accountId].balance += accounts[accountId].balance + amount; // updates the user's account.
+        
+        emit actionDeposit(accountId, accounts[accountId].balance); 
     }
     
     function transferToAccount(uint _from, uint _to, uint amount) 
@@ -163,58 +194,59 @@ contract CryptoBank {
         emit action_BlockAcct(_account);
     }
     
-    // function to erase accounts from clientAccounts.
-    function swapArray(uint[] storage myArray, uint index) internal {
-        uint element = myArray[index];
-        myArray[index] = myArray[myArray.length - 1];
-        delete myArray[myArray.length - 1];
-    }
-    
     function closeAccount(uint _account) public isBank accountExists(_account) {
         address payable acctOwner = payable(accounts[_account].owner); // owner
-        uint acctToDeleteIdx; // helper to index owner's account and update array
-        for (uint i = 0; i < clientAccounts[acctOwner].length; i++) {
-            if (clientAccounts[acctOwner][i] == _account) {
-                acctToDeleteIdx = i; // when the idx is found, update the helper.
-            }
-        }
         acctOwner.transfer(accounts[_account].balance); // send balance to owner.
-        swapArray(clientAccounts[acctOwner], acctToDeleteIdx); // swap positions with the last position to delete locally.
+        
+        delete clientAccounts[acctOwner]; // delete from owner - acct.
         delete accounts[_account]; // delete from mapping
+
         emit action_DeleteAccount(_account);
     }
 
-    function getNextLoanRequest()
+    function viewNextLoanRequest()
         public
         isBank
         view
-        returns(uint256 [2] memory)
+        returns(uint, uint)
     {
         Loan storage newLoan = requestedLoans[requestedLoans.length - 1];
-        uint256 [2] memory info = [newLoan.account, newLoan.amount];
-        return info;
+        return (newLoan.account, newLoan.amountLoaned);
+    }
+    
+    function calculateLoanAmount(uint _loanQty, uint interest) 
+        public pure returns (uint256) 
+    {
+        return _loanQty + ((_loanQty * interest) / 100);
     }
 
     function requestLoan(
-        uint amount, uint _account, bool isCollateralized
+        uint amount, uint _account
     )
         public 
         clientHasLoan(_account)
         bankCanLoan(amount)
-        isBank
+        isOwner(_account)
     {
+        // calculates the value of the owned amount with interest
+        uint finalOwnedAmount = calculateLoanAmount(amount, 10);
+        
+        // adds new loan to requests.
         requestedLoans.push(Loan({
             owner: msg.sender,
             isApproved: false,
-            isCollateralized: isCollateralized,
+            isCollateralized: false,
             isPayed: false,
             account: _account,
-            amount: amount,
+            amountLoaned: amount,
             startDate: 0,
-            totalPayed: 0
+            endDate: 0,
+            totalPayed: 0,
+            // should be calculated initial amount.
+            totalOwned: finalOwnedAmount
         }));
 
-        emit loan_RequestCreated(amount, _account, isCollateralized);
+        emit loan_RequestCreated(amount, _account, false);
     }
 
     function approveOrRejectLoan(bool _decision) 
@@ -222,24 +254,97 @@ contract CryptoBank {
         isBank
         returns (bool)
     {   
-        Loan memory loan = requestedLoans[requestedLoans.length - 1];
+        Loan memory loan = requestedLoans[requestedLoans.length - 1]; // gets next loan to approve from queue.
         if (_decision == true) {
+            loan.startDate = block.timestamp; 
+            loan.endDate = block.timestamp + 30 days;
+            loan.isApproved = true;
             approvedLoans[loan.account] = loan;
             requestedLoans.pop();
         } else {
             requestedLoans.pop();
         }
+        emit loan_ApprovedOrRejected(loan.account, _decision);
+
         return _decision;
     }
 
-    function payLoan(uint256 amount, uint256 _account) 
+    function viewDaysSinceStart(uint256 _account) 
+        public
+        view
+        returns(uint, uint, uint)
+    {
+        Loan storage loan = approvedLoans[_account];
+        uint daysSinceStart = (loan.endDate - loan.startDate) / 30 days;
+        return (loan.endDate, loan.startDate, daysSinceStart);
+    }
+
+    function viewMonthsDue(uint256 _account) 
+        public
+        view
+        returns(uint)
+    {
+        Loan storage loan = approvedLoans[_account];
+        uint monthsDue = ((block.timestamp - loan.endDate) / 1 days) / 30;
+        return monthsDue;
+    }
+
+    function closeLoanDeal(uint _account)
+        public
+    {
+        accounts[_account].hasLoan = false;
+        approvedLoans[_account].isPayed = true;
+    }
+
+    function payLoan(uint256 payAmount, uint256 _account) 
         public
         payable
-    {
+        isOwner(_account)
+    {  
+        Loan storage loan = approvedLoans[_account];
+
+        // gets the amount of days a user is late
+        (,,uint daysSinceStart) = viewDaysSinceStart(_account);
+        bool isLate = daysSinceStart == 0;
+        
+        // removes qty amount from account.
+        accounts[_account].balance -= payAmount;
+
+        // there's a small caveat where if the user waits 
+        // more than 30 days to pay he can avoid getting
+        // the correct total with compound interest...
+            
+        // If user has not yet paid the loan and is late
+        // then a compound interest is added adding --> loanedAmount + (n (months late) interest % ... , n - 1)
+        if (isLate == true) {
+            // TODO: add variable to get index of compound interes + actual interest
+            uint monthsDue = viewMonthsDue(_account);
+            if (loan.isCollateralized == true) {
+                // add collateralized interest.
+                loan.totalOwned += calculateLoanAmount(loan.amountLoaned, 1 * monthsDue);
+                loan.totalOwned -= payAmount;
+                loan.totalPayed += payAmount;
+
+            } else {
+                // add compount interest amount * days late. 
+                loan.totalOwned += calculateLoanAmount(loan.amountLoaned, 10 * monthsDue);
+                loan.totalOwned -= payAmount;
+                loan.totalPayed += payAmount;
+            }
+            // updates due date of loan liquidation.
+            loan.endDate = ((monthsDue * 30) * 1 days) + loan.startDate;
+        } else {
+            loan.totalOwned -= payAmount;
+            loan.totalPayed += payAmount;
+        }
+
+        emit loan_AmountPayed(_account, payAmount);
+
+        if (loan.totalOwned == 0) {
+            closeLoanDeal(_account);
+        }
 
     }
+    
+
 }
-
-
-
-
