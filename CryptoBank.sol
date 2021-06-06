@@ -309,15 +309,10 @@ contract CryptoBank {
         
         // removes qty amount from account.
         accounts[_account].balance -= payAmount;
-
-        // there's a small caveat where if the user waits 
-        // more than 30 days to pay he can avoid getting
-        // the correct total with compound interest...
             
         // If user has not yet paid the loan and is late
         // then a compound interest is added adding --> loanedAmount + (n (months late) interest % ... , n - 1)
         if (isLate == true) {
-            // TODO: add variable to get index of compound interes + actual interest
             uint monthsDue = viewMonthsDue(_account);
             if (loan.isCollateralized == true) {
                 // add collateralized interest.
@@ -343,7 +338,6 @@ contract CryptoBank {
         if (loan.totalOwned == 0) {
             closeLoanDeal(_account);
         }
-
     }
     
 
