@@ -59,10 +59,11 @@ contract CryptoBank {
         bool isPayed;
         uint account;
         uint256 amountLoaned;
-        uint256 startDate;
+        uint256 collateralQty;
         uint256 endDate;
-        uint256 totalPayed;
+        uint256 startDate;
         uint256 totalOwned;
+        uint256 totalPayed;
     }
 
     // loan requests
@@ -70,8 +71,8 @@ contract CryptoBank {
 
     // modifiers
     modifier isOwner(uint uid) {
-        uint c_Account = clientAccounts[msg.sender];
-        require(c_Account != 0, "To make this operation, you have to be the owner of the account.");
+        uint id_Account = clientAccounts[msg.sender];
+        require(id_Account == uid, "To make this operation, you have to be the owner of the account.");
         _;
     }
     
@@ -115,7 +116,45 @@ contract CryptoBank {
         _;
     }
     
-    // functions
+    /** functions **/
+
+    // adds accounts to be tested in remix easily.
+    function addStagingEnv() public {
+        accounts[1111] = Account({
+            firstName: 'Juan',
+            lastName: 'Perez',
+            uid: 1111,
+            balance: 0,
+            isBlocked: false,
+            hasLoan: false,
+            owner: 0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2
+        });
+
+        accounts[2222] = Account({
+            firstName: 'Juan',
+            lastName: 'Perez',
+            uid: 2222,
+            balance: 0,
+            isBlocked: false,
+            hasLoan: false,
+            owner: 0x4B20993Bc481177ec7E8f571ceCaE8A9e22C02db
+        });
+        accounts[3333] = Account({
+            firstName: 'Juan',
+            lastName: 'Perez',
+            uid: 3333,
+            balance: 0,
+            isBlocked: false,
+            hasLoan: false,
+            owner: 0x78731D3Ca6b7E34aC0F824c42a7cC18A495cabaB
+        });
+        clientAccounts[0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2] = 1111;
+        clientAccounts[0x4B20993Bc481177ec7E8f571ceCaE8A9e22C02db] = 2222;
+        clientAccounts[0x78731D3Ca6b7E34aC0F824c42a7cC18A495cabaB] = 3333;
+        accountsNo += 0;
+    }
+
+    // adds a dummy loan to test functionality.
     function addDummyLoan() public returns(Loan memory) {
         approvedLoans[12345678] = Loan({
             owner: msg.sender,
@@ -133,6 +172,7 @@ contract CryptoBank {
         return approvedLoans[12345678];
     }
     
+    // creates a new account for clients.
     function createAccount(string memory _fName, string memory _lName) public onlyOneAccount {
         bytes memory _seed = abi.encodePacked(_fName, _lName, block.timestamp);
         uint rand = uint(keccak256(_seed));
@@ -153,7 +193,11 @@ contract CryptoBank {
         emit actionAccountCreated(_fName, _lName, randomId);
     }
     
-    function depositToAccount(uint accountId) public payable {
+    // deposits real amount to a client's account. 
+    // Is strictly payable. 
+    function depositToAccount(uint accountId) 
+        public payable accountExists(accountId)
+    {
         require(msg.value != 0, "Should at least deposit a fraction of a number, not 0.");
         
         uint256 amount = msg.value;
@@ -167,6 +211,7 @@ contract CryptoBank {
         emit actionDeposit(accountId, accounts[accountId].balance); 
     }
     
+    // can transfer balance from one account to the other.
     function transferToAccount(uint _from, uint _to, uint amount) 
         public 
         payable 
@@ -180,10 +225,13 @@ contract CryptoBank {
         emit action_Transfer(_from, _to, amount);
     }
     
+    // views the balance of an account.
     function viewBalance(uint _account) public view isOwner(_account) returns(uint256) {
         return accounts[_account].balance;
     }
     
+    // blocks an account and impedes it from transfering.
+    // (ONLY BANK)
     function setBlockAccount(uint _account, bool _isBlocked) public isBank {
         if (accounts[_account].isBlocked == true){
             require(_isBlocked != true, "The account is already blocked.");
@@ -194,6 +242,8 @@ contract CryptoBank {
         emit action_BlockAcct(_account);
     }
     
+    // closes an account and transfers real amount to a client.
+    // TODO: if user has a loan pending, the account can't be closed.
     function closeAccount(uint _account) public isBank accountExists(_account) {
         address payable acctOwner = payable(accounts[_account].owner); // owner
         acctOwner.transfer(accounts[_account].balance); // send balance to owner.
@@ -204,6 +254,9 @@ contract CryptoBank {
         emit action_DeleteAccount(_account);
     }
 
+    /**
+     * checks the next loan request in the loans queue.
+     */ 
     function viewNextLoanRequest()
         public
         isBank
@@ -214,12 +267,18 @@ contract CryptoBank {
         return (newLoan.account, newLoan.amountLoaned);
     }
     
+    /**
+    * calculates the loan amount with the total interest.
+    */
     function calculateLoanAmount(uint _loanQty, uint interest) 
         public pure returns (uint256) 
     {
         return _loanQty + ((_loanQty * interest) / 100);
     }
 
+    /**
+    *    requests a simple loan
+    */
     function requestLoan(
         uint amount, uint _account
     )
@@ -243,12 +302,52 @@ contract CryptoBank {
             endDate: 0,
             totalPayed: 0,
             // should be calculated initial amount.
+            collateralQty: 0,
             totalOwned: finalOwnedAmount
         }));
 
         emit loan_RequestCreated(amount, _account, false);
     }
 
+    /**
+    *    requests an overcollateralized loan
+    */
+    function requestCollateralizedLoan(
+        uint amount, uint _account, uint collateralAmount
+    )
+        public 
+        clientHasLoan(_account)
+        bankCanLoan(amount)
+        isOwner(_account)
+    {
+        // calculates the value of the owned amount with interest
+        uint finalOwnedAmount = calculateLoanAmount(amount, 1); // calculates the owned amount for the loan.
+        uint collateralQty = calculateLoanAmount(amount, 200); // calculates the collateral to check if it's correct.
+
+        require(collateralQty == collateralAmount, "The collateral amount is incorrect, please leave 200% of the requested loan.");
+        // adds new loan to requests.
+        requestedLoans.push(Loan({
+            owner: msg.sender,
+            isApproved: false,
+            isCollateralized: true,
+            isPayed: false,
+            account: _account,
+            amountLoaned: amount,
+            startDate: 0,
+            endDate: 0,
+            totalPayed: 0,
+            // should be calculated initial amount.
+            collateralQty: collateralAmount,
+            totalOwned: finalOwnedAmount
+        }));
+
+        emit loan_RequestCreated(amount, _account, false);
+    }
+
+    /**
+    *    approves or rejects the next request in queue.
+    *   (ONLY BANK)
+    */
     function approveOrRejectLoan(bool _decision) 
         public
         isBank
@@ -259,7 +358,12 @@ contract CryptoBank {
             loan.startDate = block.timestamp; 
             loan.endDate = block.timestamp + 30 days;
             loan.isApproved = true;
+
+            // adds the loan to the mapping.
             approvedLoans[loan.account] = loan;
+
+            // adds the loaned amount to the requestor.
+            accounts[loan.account].balance += loan.amountLoaned;
             requestedLoans.pop();
         } else {
             requestedLoans.pop();
@@ -269,6 +373,8 @@ contract CryptoBank {
         return _decision;
     }
 
+    /** loan views. **/
+     
     function viewDaysSinceStart(uint256 _account) 
         public
         view
@@ -284,29 +390,54 @@ contract CryptoBank {
         view
         returns(uint)
     {
+        require(approvedLoans[_account].account == _account, "Please use a valid loan to view the data.");
         Loan storage loan = approvedLoans[_account];
         uint monthsDue = ((block.timestamp - loan.endDate) / 1 days) / 30;
         return monthsDue;
     }
 
-    function closeLoanDeal(uint _account)
+    function viewAmountPayedLoan() 
         public
+        view
     {
-        accounts[_account].hasLoan = false;
-        approvedLoans[_account].isPayed = true;
+        return loans[clientAccounts[msg.sender]].totalPayedLoan;
     }
 
+    function viewAmountOwned() 
+        public
+        view
+    {
+        return loans[clientAccounts[msg.sender]].totalOwned;
+    }
+
+    // close loan deal and delete it from contract.
+    function closeLoanDeal(uint _account)
+        internal
+    {
+        // if loan was overcollateralized, then return the collateral amount to user.
+        if (approvedLoans[_account].isCollateralized == true) {
+            accounts[_account].balance += approvedLoans[_account].collateralQty;
+        }
+        accounts[_account].hasLoan = false;
+        delete approvedLoans[_account];
+    }
+
+    // pay a loan, check if there's a delay in payments 
+    // and add compound interest to owned amount.
     function payLoan(uint256 payAmount, uint256 _account) 
         public
         payable
         isOwner(_account)
     {  
         Loan storage loan = approvedLoans[_account];
-
+        // checks that the account has a loan and exists.
+        require(loan.owner msg.sender, "Only the owner can pay his loan or the account does not exist");
+        // checks that the client is not paying more than owned.
+        require(payAmount <= loan.totalOwned, "The amount to pay should be smaller or equal to the total owned amount.");
         // gets the amount of days a user is late
         (,,uint daysSinceStart) = viewDaysSinceStart(_account);
+        // if there are 0 days left then the loan is late due.
         bool isLate = daysSinceStart == 0;
-        
         // removes qty amount from account.
         accounts[_account].balance -= payAmount;
             
@@ -336,7 +467,7 @@ contract CryptoBank {
         emit loan_AmountPayed(_account, payAmount);
 
         if (loan.totalOwned == 0) {
-            closeLoanDeal(_account);
+            closeLoanDeal(_account); // closes the loan deal and marks the loan as payed.
         }
     }
     
